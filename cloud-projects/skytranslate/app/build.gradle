@@ -1,0 +1,74 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Release signing is read from environment variables (set by the GitHub workflow) or
+// from ~/.gradle/gradle.properties / -P flags for local builds. Nothing secret is stored in the repo.
+def signingValue = { String name -> System.getenv(name) ?: (project.findProperty(name) as String) }
+def hasSigning = ['RELEASE_KEYSTORE_FILE', 'RELEASE_KEYSTORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD']
+        .every { !(signingValue(it) ?: '').isEmpty() }
+
+android {
+    namespace 'com.sky.translate'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.sky.translate'
+        minSdk 24
+        targetSdk 35
+        versionCode = Integer.parseInt(System.getenv('APP_VERSION_CODE') ?: '1')
+        versionName = (System.getenv('APP_VERSION_NAME') ?: '1.0.0')
+    }
+
+    signingConfigs {
+        if (hasSigning) {
+            release {
+                storeFile file(signingValue('RELEASE_KEYSTORE_FILE'))
+                storePassword signingValue('RELEASE_KEYSTORE_PASSWORD')
+                keyAlias signingValue('RELEASE_KEY_ALIAS')
+                keyPassword signingValue('RELEASE_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Minification is off on purpose: the app bundles five ML Kit models, so R8 saves little,
+            // and the JS bridge must keep its @JavascriptInterface names.
+            minifyEnabled false
+            shrinkResources false
+            if (hasSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        buildConfig = true
+    }
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity-ktx:1.9.3'
+    implementation 'androidx.webkit:webkit:1.12.1'
+
+    // Google ML Kit text recognition (bundled models, work offline). Tamil is NOT covered by these.
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-devanagari:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-korean:16.0.1'
+}

@@ -1,0 +1,5 @@
+<resources>
+    <!-- Same values as the HTML page background (light / dark) (light / dark), so there is no flash while the page loads. -->
+    <color name="app_bg">#EFF2F8</color>
+    <color name="icon_bg">#0B57D0</color>
+</resources>

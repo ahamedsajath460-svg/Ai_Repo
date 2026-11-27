@@ -1,0 +1,17 @@
+# Paste ALL of this into the single GitHub secret named AI_API, then replace each PASTE_KEY with a real key.
+# One "provider:KEY" per line. The line order is the fallback order: if a key fails, the next line is used.
+# Lines still containing PASTE_KEY are skipped, so you can delete or leave unused ones.
+groq:PASTE_KEY
+groq:PASTE_KEY
+groq:PASTE_KEY
+groq:PASTE_KEY
+gemini:PASTE_KEY
+gemini:PASTE_KEY
+gemini:PASTE_KEY
+gemini:PASTE_KEY
+openrouter:PASTE_KEY
+openrouter:PASTE_KEY
+openrouter:PASTE_KEY
+pollinations:PASTE_KEY
+tavily:PASTE_KEY
+tavily:PASTE_KEY

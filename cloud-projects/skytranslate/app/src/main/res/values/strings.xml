@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Sky Translate</string>
+    <string name="app_short_name">Sky</string>
+    <string name="brand_name">SkyNex Apps</string>
+    <string name="camera_denied">Camera access is blocked. Use the gallery button</string>
+    <string name="no_gallery">No app found to pick an image</string>
+</resources>
