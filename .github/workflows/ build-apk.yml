@@ -1,0 +1,179 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # Secrets (all optional - see README-BUILD.md)
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD_SECRET: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Inject GitHub tokens + AI keys from secrets (all optional)
+        env:
+          # legacy single token (still works), then 5 per provider; empty ones are skipped
+          APP_KEYS: ${{ secrets.APP_KEYS }}
+          APP_GITHUB_TOKEN: ${{ secrets.APP_GITHUB_TOKEN }}
+          APP_REPO: ${{ secrets.APP_REPO != '' && secrets.APP_REPO || github.repository }}
+          APP_GITHUB_TOKEN_1: ${{ secrets.APP_GITHUB_TOKEN_1 }}
+          APP_GITHUB_TOKEN_2: ${{ secrets.APP_GITHUB_TOKEN_2 }}
+          APP_GITHUB_TOKEN_3: ${{ secrets.APP_GITHUB_TOKEN_3 }}
+          APP_GITHUB_TOKEN_4: ${{ secrets.APP_GITHUB_TOKEN_4 }}
+          APP_GITHUB_TOKEN_5: ${{ secrets.APP_GITHUB_TOKEN_5 }}
+          OPENROUTER_KEY_1: ${{ secrets.OPENROUTER_KEY_1 }}
+          OPENROUTER_KEY_2: ${{ secrets.OPENROUTER_KEY_2 }}
+          OPENROUTER_KEY_3: ${{ secrets.OPENROUTER_KEY_3 }}
+          OPENROUTER_KEY_4: ${{ secrets.OPENROUTER_KEY_4 }}
+          OPENROUTER_KEY_5: ${{ secrets.OPENROUTER_KEY_5 }}
+          GROQ_KEY_1: ${{ secrets.GROQ_KEY_1 }}
+          GROQ_KEY_2: ${{ secrets.GROQ_KEY_2 }}
+          GROQ_KEY_3: ${{ secrets.GROQ_KEY_3 }}
+          GROQ_KEY_4: ${{ secrets.GROQ_KEY_4 }}
+          GROQ_KEY_5: ${{ secrets.GROQ_KEY_5 }}
+          GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
+          GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
+          GEMINI_KEY_3: ${{ secrets.GEMINI_KEY_3 }}
+          GEMINI_KEY_4: ${{ secrets.GEMINI_KEY_4 }}
+          GEMINI_KEY_5: ${{ secrets.GEMINI_KEY_5 }}
+          POLLINATIONS_KEY_1: ${{ secrets.POLLINATIONS_KEY_1 }}
+          POLLINATIONS_KEY_2: ${{ secrets.POLLINATIONS_KEY_2 }}
+          POLLINATIONS_KEY_3: ${{ secrets.POLLINATIONS_KEY_3 }}
+          POLLINATIONS_KEY_4: ${{ secrets.POLLINATIONS_KEY_4 }}
+          POLLINATIONS_KEY_5: ${{ secrets.POLLINATIONS_KEY_5 }}
+          DEEPSEEK_KEY_1: ${{ secrets.DEEPSEEK_KEY_1 }}
+          DEEPSEEK_KEY_2: ${{ secrets.DEEPSEEK_KEY_2 }}
+          DEEPSEEK_KEY_3: ${{ secrets.DEEPSEEK_KEY_3 }}
+          DEEPSEEK_KEY_4: ${{ secrets.DEEPSEEK_KEY_4 }}
+          DEEPSEEK_KEY_5: ${{ secrets.DEEPSEEK_KEY_5 }}
+        run: |
+          python3 - <<'PY'
+          import os
+
+          # APP_KEYS: one secret, one "provider:key" per line (github / openrouter / groq / gemini / pollinations / deepseek).
+          # Lines with an empty key are skipped. Order inside the secret = order of use.
+          LISTED = {}
+          for raw in os.environ.get("APP_KEYS", "").replace("\r", "").split("\n"):
+              line = raw.strip()
+              if not line or line.startswith("#") or ":" not in line:
+                  continue
+              name, key = line.split(":", 1)
+              name = name.strip().lower()
+              key = key.strip().strip('"').strip("'")
+              if name == "gh":
+                  name = "github"
+              if key:
+                  LISTED.setdefault(name, []).append(key)
+
+          def collect(prefix, legacy=None):
+              out = list(LISTED.get({"APP_GITHUB_TOKEN": "github"}.get(prefix, prefix.split("_")[0].lower()), []))
+              names = ([legacy] if legacy else []) + [f"{prefix}_{i}" for i in range(1, 6)]
+              for n in names:
+                  v = os.environ.get(n, "").strip().replace("\r", "").replace("\n", "")
+                  if v and v not in out:
+                      out.append(v)
+              return out
+
+          def kt(v):
+              return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+
+          def lst(vals):
+              return "listOf(" + ", ".join(kt(v) for v in vals) + ")"
+
+          gh = collect("APP_GITHUB_TOKEN", "APP_GITHUB_TOKEN")
+          ai = {
+              "OPENROUTER": collect("OPENROUTER_KEY"),
+              "GROQ": collect("GROQ_KEY"),
+              "GEMINI": collect("GEMINI_KEY"),
+              "POLLINATIONS": collect("POLLINATIONS_KEY"),
+              "DEEPSEEK": collect("DEEPSEEK_KEY"),
+          }
+          lines = [
+              "package com.zen.cloudstudio", "",
+              "object DefaultToken {",
+              f"    val REPO: String = {kt(os.environ.get('APP_REPO', '').strip())}",
+              f"    val GITHUB_LIST: List<String> = {lst(gh)}",
+              "    val GITHUB: String = GITHUB_LIST.firstOrNull() ?: \"\"",
+              "}", "",
+              "object DefaultAiKeys {",
+          ]
+          for k, v in ai.items():
+              lines.append(f"    val {k}: List<String> = {lst(v)}")
+          lines.append("}")
+          open("app/src/main/java/com/zen/cloudstudio/DefaultToken.kt", "w").write("\n".join(lines) + "\n")
+          print("GitHub tokens:", len(gh), "| " + ", ".join(f"{k}: {len(v)}" for k, v in ai.items()))
+          PY
+
+      - name: Prepare signing key
+        run: |
+          KS="$RUNNER_TEMP/release.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Using keystore from GitHub secrets"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KEY_ALIAS_SECRET" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD_SECRET" >> "$GITHUB_ENV"
+          else
+            echo "No keystore secret found - generating a temporary one"
+            keytool -genkeypair -v -keystore "$KS" -storetype PKCS12 \
+              -storepass android123 -keypass android123 \
+              -alias zenkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Zen Cloud Studio, O=Zen, C=IN"
+            echo "KEYSTORE_PASSWORD=android123" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=zenkey" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=android123" >> "$GITHUB_ENV"
+          fi
+          echo "KEYSTORE_FILE=$KS" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK
+        id: apk
+        run: |
+          NAME="ZenCloudStudio-build${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZenCloudStudio-apk
+          path: ${{ steps.apk.outputs.name }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Zen Cloud Studio build ${{ github.run_number }}
+          body: "Auto-built APK from commit ${{ github.sha }}"
+          files: ${{ steps.apk.outputs.name }}
