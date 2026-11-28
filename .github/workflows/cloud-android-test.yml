@@ -1,0 +1,123 @@
+name: Cloud Android Test
+run-name: "Cloud Android Test ${{ inputs.build_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:       { description: "Build id (sent by Zen AI)", required: true, type: string }
+      project_dir:    { description: "Project folder", required: true, type: string }
+      gradle_version: { description: "Gradle version", required: false, default: "8.7", type: string }
+      retention_days: { description: "Artifact retention days", required: false, default: "7", type: string }
+      sdk_packages:   { description: "Extra SDK packages", required: false, default: "", type: string }
+      api_level:      { description: "Emulator API level", required: false, default: "34", type: string }
+      ui_events:      { description: "Random UI events", required: false, default: "200", type: string }
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/cloud-android-build.yml
+    with:
+      kind: debug
+      build_id: ${{ inputs.build_id }}
+      project_dir: ${{ inputs.project_dir }}
+      gradle_version: ${{ inputs.gradle_version }}
+      retention_days: ${{ inputs.retention_days }}
+      sdk_packages: ${{ inputs.sdk_packages }}
+    secrets: inherit
+
+  emulator:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check inputs
+        env:
+          API: ${{ inputs.api_level }}
+          EVENTS: ${{ inputs.ui_events }}
+          RET: ${{ inputs.retention_days }}
+        run: |
+          echo "$API" | grep -Eq '^[0-9]{2}$' || API=34
+          echo "$EVENTS" | grep -Eq '^[0-9]{1,4}$' || EVENTS=200
+          [ "$EVENTS" -gt 2000 ] && EVENTS=2000
+          if echo "$RET" | grep -Eq '^[0-9]{1,2}$' && [ "$RET" -ge 1 ] && [ "$RET" -le 90 ]; then R="$RET"; else R=7; fi
+          echo "API_LEVEL=$API" >> "$GITHUB_ENV"
+          echo "UI_EVENTS=$EVENTS" >> "$GITHUB_ENV"
+          echo "RETENTION=$R" >> "$GITHUB_ENV"
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: cloud-apk-${{ inputs.build_id }}
+          path: apk
+
+      - name: Read package name
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          PKG=$("$BT/aapt2" dump badging apk/app-debug.apk | head -n1 | sed -n "s/.*name='\([^']*\)'.*/\1/p")
+          [ -n "$PKG" ] || { echo "::error::Could not read the package name"; exit 1; }
+          echo "APP_PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Write test script
+        run: |
+          mkdir -p "$RUNNER_TEMP/emu"
+          cat > "$RUNNER_TEMP/cloud-test.sh" <<'SH'
+          OUT="$RUNNER_TEMP/emu"
+          APK="$GITHUB_WORKSPACE/apk/app-debug.apk"
+          adb wait-for-device
+          if ! adb install -r "$APK" > "$OUT/install.txt" 2>&1; then
+            cat "$OUT/install.txt"; echo "install failed" > "$OUT/crashed.txt"; exit 0
+          fi
+          adb logcat -c
+          adb shell monkey -p "$APP_PKG" -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1
+          sleep 8
+          adb exec-out screencap -p > "$OUT/01-launch.png"
+          adb shell monkey -p "$APP_PKG" --throttle 300 --pct-syskeys 0 -s 42 -v "$UI_EVENTS" > "$OUT/monkey.txt" 2>&1
+          sleep 2
+          adb exec-out screencap -p > "$OUT/02-after-events.png"
+          adb logcat -d -v time > "$OUT/logcat.txt"
+          if grep -q "FATAL EXCEPTION" "$OUT/logcat.txt" || grep -q "// CRASH" "$OUT/monkey.txt" || grep -q "ANR in $APP_PKG" "$OUT/logcat.txt"; then
+            grep -A 30 -E "FATAL EXCEPTION|ANR in $APP_PKG" "$OUT/logcat.txt" | head -n 80 > "$OUT/crashed.txt"
+            [ -s "$OUT/crashed.txt" ] || echo "crash reported by monkey" > "$OUT/crashed.txt"
+          fi
+          exit 0
+          SH
+
+      - name: Run app on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.API_LEVEL }}
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash ${{ runner.temp }}/cloud-test.sh
+
+      - name: Write report
+        if: always()
+        run: |
+          OUT="$RUNNER_TEMP/emu"; mkdir -p "$OUT"
+          CRASHED=false; [ -f "$OUT/crashed.txt" ] && CRASHED=true
+          printf '{"build_id":"%s","package":"%s","api_level":"%s","ui_events":"%s","crashed":%s}\n' \
+            "${{ inputs.build_id }}" "$APP_PKG" "$API_LEVEL" "$UI_EVENTS" "$CRASHED" > "$OUT/report.json"
+
+      - name: Upload emulator reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-emu-${{ inputs.build_id }}
+          path: ${{ runner.temp }}/emu/
+          retention-days: ${{ env.RETENTION }}
+          if-no-files-found: ignore
+
+      - name: Fail if the app crashed
+        run: |
+          if [ -f "$RUNNER_TEMP/emu/crashed.txt" ]; then
+            echo "::error::The app crashed or did not start on the emulator"; head -n 40 "$RUNNER_TEMP/emu/crashed.txt"; exit 1
+          fi

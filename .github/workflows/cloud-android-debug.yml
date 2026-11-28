@@ -1,0 +1,26 @@
+name: Cloud Android Debug
+run-name: "Cloud Android Debug ${{ inputs.build_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:       { description: "Build id (sent by Zen AI)", required: true, type: string }
+      project_dir:    { description: "Project folder", required: true, type: string }
+      gradle_version: { description: "Gradle version", required: false, default: "8.7", type: string }
+      retention_days: { description: "Artifact retention days", required: false, default: "7", type: string }
+      sdk_packages:   { description: "Extra SDK packages", required: false, default: "", type: string }
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/cloud-android-build.yml
+    with:
+      kind: debug
+      build_id: ${{ inputs.build_id }}
+      project_dir: ${{ inputs.project_dir }}
+      gradle_version: ${{ inputs.gradle_version }}
+      retention_days: ${{ inputs.retention_days }}
+      sdk_packages: ${{ inputs.sdk_packages }}
+    secrets: inherit

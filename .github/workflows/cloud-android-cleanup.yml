@@ -1,0 +1,36 @@
+name: Cloud Android Cleanup
+run-name: "Cloud Android Cleanup"
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      retention_days: { description: "Delete cloud artifacts and runs older than N days", required: false, default: "7", type: string }
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DAYS_IN: ${{ inputs.retention_days }}
+    steps:
+      - name: Delete old cloud artifacts and runs
+        run: |
+          DAYS=7; echo "$DAYS_IN" | grep -Eq '^[0-9]{1,2}$' && [ "$DAYS_IN" -ge 1 ] && DAYS="$DAYS_IN"
+          CUT=$(date -u -d "-$DAYS days" +%Y-%m-%dT%H:%M:%SZ)
+          echo "Deleting older than $CUT"
+          for id in $(gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name|startswith(\"cloud-\")) | select(.created_at < \"$CUT\") | .id"); do
+            gh api -X DELETE "repos/$REPO/actions/artifacts/$id" > /dev/null && echo "artifact $id deleted"
+          done
+          for id in $(gh api --paginate "repos/$REPO/actions/runs?per_page=100&status=completed" \
+              --jq ".workflow_runs[] | select(.name|startswith(\"Cloud Android\")) | select(.created_at < \"$CUT\") | .id"); do
+            gh api -X DELETE "repos/$REPO/actions/runs/$id" > /dev/null && echo "run $id deleted"
+          done

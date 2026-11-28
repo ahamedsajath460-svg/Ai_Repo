@@ -1,0 +1,164 @@
+# Reusable build job. Called by cloud-android-debug.yml, cloud-android-release.yml and cloud-android-test.yml.
+name: Cloud Android Build
+
+on:
+  workflow_call:
+    inputs:
+      kind:           { type: string, required: true }              # debug | release
+      build_id:       { type: string, required: true }
+      project_dir:    { type: string, required: true }              # cloud-projects/<slug>
+      gradle_version: { type: string, required: false, default: "8.7" }
+      retention_days: { type: string, required: false, default: "7" }
+      sdk_packages:   { type: string, required: false, default: "" }
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check inputs
+        env:
+          KIND: ${{ inputs.kind }}
+          BUILD_ID: ${{ inputs.build_id }}
+          PROJECT_DIR: ${{ inputs.project_dir }}
+          RET: ${{ inputs.retention_days }}
+        run: |
+          set -eu
+          case "$KIND" in debug|release) ;; *) echo "::error::kind must be debug or release"; exit 1;; esac
+          echo "$BUILD_ID" | grep -Eq '^[A-Za-z0-9_.-]{1,64}$' || { echo "::error::bad build_id"; exit 1; }
+          echo "$PROJECT_DIR" | grep -Eq '^cloud-projects/[A-Za-z0-9_.-]{1,100}$' || { echo "::error::bad project_dir"; exit 1; }
+          case "$PROJECT_DIR" in *..*) echo "::error::bad project_dir"; exit 1;; esac
+          if echo "$RET" | grep -Eq '^[0-9]{1,2}$' && [ "$RET" -ge 1 ] && [ "$RET" -le 90 ]; then R="$RET"; else R=7; fi
+          echo "RETENTION=$R" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check project folder
+        env:
+          PROJECT_DIR: ${{ inputs.project_dir }}
+        run: |
+          [ -d "$PROJECT_DIR" ] || { echo "::error::Project folder $PROJECT_DIR not found on this branch"; exit 1; }
+          ls -la "$PROJECT_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ inputs.gradle_version }}
+
+      - name: Android SDK licences and extra packages
+        env:
+          SDK_PACKAGES: ${{ inputs.sdk_packages }}
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          for p in $(echo "$SDK_PACKAGES" | tr ',' ' '); do
+            echo "$p" | grep -Eq '^[A-Za-z0-9._;-]+$' || { echo "skipping invalid package name"; continue; }
+            "$SDKM" "$p"
+          done
+
+      - name: Build ${{ inputs.kind }} APK
+        env:
+          KIND: ${{ inputs.kind }}
+          PROJECT_DIR: ${{ inputs.project_dir }}
+        run: |
+          cd "$PROJECT_DIR"
+          if [ "$KIND" = release ]; then TASK=assembleRelease; else TASK=assembleDebug; fi
+          gradle "$TASK" --no-daemon --stacktrace
+
+      - name: Collect, sign and describe the APK
+        id: pack
+        env:
+          KIND: ${{ inputs.kind }}
+          PROJECT_DIR: ${{ inputs.project_dir }}
+          BUILD_ID: ${{ inputs.build_id }}
+          KS_B64: ${{ secrets.CLOUD_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.CLOUD_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.CLOUD_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.CLOUD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APK=$(find "$PROJECT_DIR" -type f -path "*/build/outputs/apk/$KIND/*.apk" ! -name '*androidTest*' | sort | head -n1)
+          [ -n "$APK" ] || { echo "::error::No $KIND APK was produced"; exit 1; }
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          UNS="$RUNNER_TEMP/apk"; SIG="$RUNNER_TEMP/signed"; mkdir -p "$UNS" "$SIG"
+
+          describe() {   # $1 = apk, $2 = cert sha256 (may be empty)
+            local f="$1" line
+            line=$("$BT/aapt2" dump badging "$f" | head -n1)
+            PKG=$(sed -n "s/.*name='\([^']*\)'.*/\1/p" <<<"$line")
+            VC=$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" <<<"$line")
+            VN=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<<"$line")
+            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" > "$(basename "$f").sha256" )
+            SHA=$(sha256sum "$f" | cut -d' ' -f1)
+            python3 - "$f" "$2" <<'PY'
+          import json, os, sys
+          f, cert = sys.argv[1], sys.argv[2]
+          json.dump({"build_id": os.environ["BUILD_ID"], "kind": os.environ["KIND"], "file": os.path.basename(f),
+                     "package": os.environ.get("PKG", ""), "versionName": os.environ.get("VN", ""),
+                     "versionCode": int(os.environ.get("VC") or 0), "sha256": os.environ.get("SHA", ""),
+                     "certSha256": cert, "size": os.path.getsize(f)},
+                    open(os.path.join(os.path.dirname(f), "build-info.json"), "w"))
+          PY
+          }
+          export PKG VC VN SHA
+
+          SIGNED=false
+          if [ "$KIND" = debug ]; then
+            cp "$APK" "$UNS/app-debug.apk"
+            describe "$UNS/app-debug.apk" ""
+          else
+            cp "$APK" "$UNS/app-release-unsigned.apk"
+            if [ -n "$KS_B64" ] && [ -n "$KS_ALIAS" ]; then
+              echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+              "$BT/zipalign" -p -f 4 "$UNS/app-release-unsigned.apk" "$RUNNER_TEMP/aligned.apk"
+              "$BT/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-pass env:KS_PASS \
+                --ks-key-alias "$KS_ALIAS" --key-pass env:KEY_PASS \
+                --out "$SIG/app-release-signed.apk" "$RUNNER_TEMP/aligned.apk"
+              "$BT/apksigner" verify "$SIG/app-release-signed.apk"
+              CERT=$("$BT/apksigner" verify --print-certs "$SIG/app-release-signed.apk" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n1)
+              describe "$SIG/app-release-signed.apk" "$CERT"
+              rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/aligned.apk"
+              SIGNED=true
+            else
+              echo "::warning::Release signing is not set up (keystore secrets CLOUD_KEYSTORE_BASE64 / CLOUD_KEYSTORE_PASSWORD / CLOUD_KEY_ALIAS / CLOUD_KEY_PASSWORD missing). The APK is unsigned and cannot be installed."
+              describe "$UNS/app-release-unsigned.apk" ""
+            fi
+          fi
+          echo "signed=$SIGNED" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK (cloud-apk)
+        if: inputs.kind == 'debug' || steps.pack.outputs.signed != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-apk-${{ inputs.build_id }}
+          path: ${{ runner.temp }}/apk/
+          retention-days: ${{ env.RETENTION }}
+          if-no-files-found: error
+
+      - name: Upload signed APK (cloud-signed)
+        if: steps.pack.outputs.signed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-signed-${{ inputs.build_id }}
+          path: ${{ runner.temp }}/signed/
+          retention-days: ${{ env.RETENTION }}
+          if-no-files-found: error
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-log-${{ inputs.build_id }}
+          path: ${{ inputs.project_dir }}/**/build/reports/
+          retention-days: ${{ env.RETENTION }}
+          if-no-files-found: ignore
